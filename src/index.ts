@@ -195,6 +195,403 @@ app.post('/api/verifications', async (req: Request<{}, {}, CreateVerificationBod
   }
 });
 
+interface VerifyWorldBody {
+  verifiedEns: string;
+  field: string;
+  fieldHash: string;
+  worldProof: {
+    merkleRoot: string;
+    nullifierHash: string;
+    proof: string;
+    signal?: string;
+  };
+  methodUrl?: string;
+}
+
+// Verify with World ID (POST /verify/world)
+app.post('/verify/world', async (req: Request<{}, {}, VerifyWorldBody>, res: Response) => {
+  try {
+    const { verifiedEns, field, fieldHash, worldProof, methodUrl } = req.body;
+
+    if (!verifiedEns || !field || !fieldHash || !worldProof) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    const validFields = ['full_name', 'dob', 'passport_id'];
+    if (!validFields.includes(field)) {
+      return res.status(400).json({ error: `Invalid field. Must be one of: ${validFields.join(', ')}` });
+    }
+
+    const WORLDCOIN_APP_ID = process.env.WORLDCOIN_APP_ID;
+    if (!WORLDCOIN_APP_ID) {
+      return res.status(500).json({ error: 'Worldcoin App ID not configured' });
+    }
+
+    const verifyResponse = await fetch('https://developer.worldcoin.org/api/v1/verify', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        app_id: WORLDCOIN_APP_ID,
+        merkle_root: worldProof.merkleRoot,
+        nullifier_hash: worldProof.nullifierHash,
+        proof: worldProof.proof,
+        verification_level: 'orb',
+        action: 'verify-ens',
+        signal: worldProof.signal || `${verifiedEns}:${fieldHash}`,
+      }),
+    });
+
+    if (!verifyResponse.ok) {
+      const errorData: any = await verifyResponse.json().catch(() => ({ detail: 'Unknown error' }));
+      return res.status(400).json({ error: `World ID verification failed: ${errorData.detail || 'Invalid proof'}` });
+    }
+
+    const verifyData: any = await verifyResponse.json();
+    if (!verifyData.verified) {
+      return res.status(400).json({ error: 'World ID proof verification failed' });
+    }
+
+    const existingProof = await prisma.worldProof.findUnique({
+      where: { nullifierHash: worldProof.nullifierHash },
+    });
+
+    if (existingProof) {
+      return res.status(400).json({ error: 'This World ID proof has already been used' });
+    }
+
+    await prisma.worldProof.create({
+      data: {
+        nullifierHash: worldProof.nullifierHash,
+        merkleRoot: worldProof.merkleRoot,
+        proof: worldProof.proof,
+        signal: worldProof.signal || `${verifiedEns}:${fieldHash}`,
+      },
+    });
+
+    const verifiedEnsOwner = await getEnsOwner(verifiedEns, ethProvider);
+    const verifiedEnsExpiry = await getEnsExpiry(verifiedEns, ethProvider);
+
+    const verification = await prisma.verification.create({
+      data: {
+        verifiedEns: verifiedEns.toLowerCase(),
+        field,
+        fieldHash,
+        verifierType: 'world',
+        verifierId: worldProof.nullifierHash,
+        ensName: null,
+        ownerSnapshot: verifiedEnsOwner || null,
+        expirySnapshot: verifiedEnsExpiry || null,
+        methodUrl: methodUrl || null,
+        status: 'active',
+        sig: null,
+        attestationUid: null,
+      },
+    });
+
+    res.status(201).json(verification);
+  } catch (error: any) {
+    console.error('Error verifying with World ID:', error);
+    res.status(500).json({ error: `Internal server error: ${error.message || 'Unknown error'}` });
+  }
+});
+
+interface VerificationQuery {
+  field?: string;
+  status?: string;
+}
+
+// Get verifications for an ENS (GET /api/verifications/:subjectEns)
+app.get('/api/verifications/:subjectEns', async (req: Request<{ subjectEns: string }, {}, {}, VerificationQuery>, res: Response) => {
+  try {
+    const { subjectEns } = req.params;
+    const { field, status } = req.query;
+
+    const where: {
+      verifiedEns: string;
+      field?: string;
+      status?: string;
+    } = {
+      verifiedEns: subjectEns.toLowerCase(),
+    };
+
+    if (field) {
+      where.field = field;
+    }
+
+    if (status) {
+      where.status = status;
+    }
+
+    const verifications = await prisma.verification.findMany({
+      where,
+      orderBy: {
+        createdAt: 'desc',
+      },
+    });
+
+    const enriched = await Promise.all(
+      verifications.map(async (v) => {
+        const currentOwner = await getEnsOwner(v.verifiedEns, ethProvider);
+        const currentExpiry = await getEnsExpiry(v.verifiedEns, ethProvider);
+
+        const ownershipMatches = currentOwner?.toLowerCase() === v.ownerSnapshot?.toLowerCase();
+        const expiryValid = !v.expirySnapshot ||
+          (currentExpiry && currentExpiry > new Date() &&
+            (!v.expirySnapshot || currentExpiry.getTime() === v.expirySnapshot.getTime()));
+
+        const result: any = { ...v };
+        if (v.attestationUid) {
+          result.attestationExplorerUrl = getAttestationExplorerUrl(v.attestationUid, 84532);
+        }
+
+        const isEnsValid = ownershipMatches && expiryValid;
+
+        let verifierValid = true;
+        if (v.verifierType === 'ens' && v.ensName) {
+          const verifierEnsExpiry = await getEnsExpiry(v.ensName, ethProvider);
+          if (verifierEnsExpiry && verifierEnsExpiry < new Date()) {
+            verifierValid = false;
+            if (v.status === 'active') {
+              await prisma.verification.update({
+                where: { id: v.id },
+                data: { status: 'revoked', revokedAt: new Date() },
+              });
+            }
+          }
+        } else if (v.verifierType === 'world') {
+          const worldProof = await prisma.worldProof.findUnique({
+            where: { nullifierHash: v.verifierId },
+          });
+          verifierValid = worldProof !== null;
+        }
+
+        const isActive = v.status === 'active';
+        const isValid = isActive && isEnsValid && verifierValid;
+
+        return {
+          ...result,
+          isValid,
+          isEnsValid,
+          isActive,
+          ownershipMatches,
+          expiryValid,
+          verifierValid,
+        };
+      })
+    );
+
+    res.json(enriched);
+  } catch (error) {
+    console.error('Error fetching verifications:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Get verification statistics (GET /api/verifications/:subjectEns/stats)
+app.get('/api/verifications/:subjectEns/stats', async (req: Request<{ subjectEns: string }>, res: Response) => {
+  try {
+    const { subjectEns } = req.params;
+
+    const verifications = await prisma.verification.findMany({
+      where: {
+        verifiedEns: subjectEns.toLowerCase(),
+        status: 'active',
+      },
+      select: {
+        field: true,
+        verifierType: true,
+        verifierId: true,
+        ensName: true,
+        createdAt: true,
+      },
+    });
+
+    const statsByField: Record<string, {
+      count: number;
+      verifiers: Array<{
+        verifierType: string;
+        verifierId: string;
+        ensName: string | null;
+        verifiedAt: string;
+      }>;
+    }> = {};
+
+    verifications.forEach((v) => {
+      if (!statsByField[v.field]) {
+        statsByField[v.field] = {
+          count: 0,
+          verifiers: [],
+        };
+      }
+
+      const existingVerifier = statsByField[v.field].verifiers.find(
+        (ver) => ver.verifierId === v.verifierId && ver.verifierType === v.verifierType
+      );
+
+      if (!existingVerifier) {
+        statsByField[v.field].count++;
+        statsByField[v.field].verifiers.push({
+          verifierType: v.verifierType,
+          verifierId: v.verifierId,
+          ensName: v.ensName,
+          verifiedAt: v.createdAt.toISOString(),
+        });
+      }
+    });
+
+    const totalFields = Object.keys(statsByField).length;
+    const allVerifiers = Object.values(statsByField).flatMap((s) => s.verifiers);
+    const totalVerifiers = new Set(
+      allVerifiers.map((v) => `${v.verifierType}:${v.verifierId}`)
+    ).size;
+    const ensVerifiersCount = allVerifiers.filter((v) => v.verifierType === 'ens').length;
+    const worldVerifiersCount = allVerifiers.filter((v) => v.verifierType === 'world').length;
+
+    res.json({
+      subjectEns: subjectEns.toLowerCase(),
+      totalFields,
+      totalVerifiers,
+      ensVerifiers: ensVerifiersCount,
+      worldVerifiers: worldVerifiersCount,
+      byField: statsByField,
+    });
+  } catch (error) {
+    console.error('Error fetching verification stats:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+interface UpdateAttestationBody {
+  attestationUid: string;
+  verifierAddress: string;
+}
+
+// Update verification with attestation UID (POST /api/verifications/:id/attestation)
+app.post('/api/verifications/:id/attestation', async (req: Request<{ id: string }, {}, UpdateAttestationBody>, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { attestationUid, verifierAddress } = req.body;
+
+    if (!attestationUid || !verifierAddress) {
+      return res.status(400).json({ error: 'Missing attestationUid or verifierAddress' });
+    }
+
+    const verification = await prisma.verification.findUnique({
+      where: { id },
+    });
+
+    if (!verification) {
+      return res.status(404).json({ error: 'Verification not found' });
+    }
+
+    if (verification.verifierType === 'ens' && verification.verifierId.toLowerCase() !== verifierAddress.toLowerCase()) {
+      return res.status(403).json({ error: 'Only the original verifier can add attestation' });
+    }
+
+    const updated = await prisma.verification.update({
+      where: { id },
+      data: { attestationUid },
+    });
+
+    const response: any = { ...updated };
+    response.attestationExplorerUrl = getAttestationExplorerUrl(attestationUid, 84532);
+
+    res.json(response);
+  } catch (error) {
+    console.error('Error updating attestation:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+interface RevokeVerificationBody {
+  verifierId: string;
+  verifierType: string;
+}
+
+// Revoke verification (POST /api/verifications/:id/revoke)
+app.post('/api/verifications/:id/revoke', async (req: Request<{ id: string }, {}, RevokeVerificationBody>, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { verifierId, verifierType } = req.body;
+
+    if (!verifierId || !verifierType) {
+      return res.status(400).json({ error: 'Missing verifierId or verifierType' });
+    }
+
+    const verification = await prisma.verification.findUnique({
+      where: { id },
+    });
+
+    if (!verification) {
+      return res.status(404).json({ error: 'Verification not found' });
+    }
+
+    if (verification.verifierId.toLowerCase() !== verifierId.toLowerCase() ||
+      verification.verifierType !== verifierType) {
+      return res.status(403).json({ error: 'Only the original verifier can revoke' });
+    }
+
+    const updated = await prisma.verification.update({
+      where: { id },
+      data: { status: 'revoked', revokedAt: new Date() },
+    });
+
+    res.json(updated);
+  } catch (error) {
+    console.error('Error revoking verification:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Get verifications by verifier (GET /api/verifications/verifier/:verifierType/:verifierId)
+app.get('/api/verifications/verifier/:verifierType/:verifierId', async (req: Request<{ verifierType: string; verifierId: string }, {}, {}, { status?: string }>, res: Response) => {
+  try {
+    const { verifierType, verifierId } = req.params;
+    const { status } = req.query;
+
+    if (verifierType !== 'ens' && verifierType !== 'world') {
+      return res.status(400).json({ error: 'Invalid verifierType. Must be "ens" or "world"' });
+    }
+
+    const where: {
+      verifierType: string;
+      verifierId: string;
+      status?: string;
+    } = {
+      verifierType,
+      verifierId: verifierId.toLowerCase(),
+    };
+
+    if (status) {
+      where.status = status;
+    }
+
+    const verifications = await prisma.verification.findMany({
+      where,
+      orderBy: {
+        createdAt: 'desc',
+      },
+    });
+
+    res.json(verifications);
+  } catch (error) {
+    console.error('Error fetching verifier verifications:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Check if address has World ID proof (GET /api/worldcoin/:address)
+app.get('/api/worldcoin/:address', async (req: Request<{ address: string }>, res: Response) => {
+  try {
+    res.json({ verified: false });
+  } catch (error: any) {
+    console.error('Error fetching Worldcoin verification:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`AskMe Server running on port ${PORT}`);
 });
