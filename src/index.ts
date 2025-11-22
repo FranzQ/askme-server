@@ -23,6 +23,27 @@ app.get('/health', (_req: Request, res: Response) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+// Get ENS names for an address (GET /api/ensNames/:address)
+app.get('/api/ensNames/:address', async (req: Request<{ address: string }>, res: Response) => {
+  try {
+    const { address } = req.params;
+    
+    // For now, use reverse lookup (only returns one name)
+    // In production, you'd query The Graph ENS subgraph to get all names
+    const ensName = await getEnsName(address, ethProvider);
+    
+    const names: string[] = [];
+    if (ensName) {
+      names.push(ensName);
+    }
+    
+    res.json({ names });
+  } catch (error) {
+    console.error('Error fetching ENS names:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // Resolve ENS owner (GET /api/resolveOwner/:ensName)
 app.get('/api/resolveOwner/:ensName', async (req: Request<{ ensName: string }>, res: Response) => {
   try {
