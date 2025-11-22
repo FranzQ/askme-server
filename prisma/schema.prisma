@@ -63,3 +63,20 @@ model VerificationRequest {
   @@index([verifiedEns])
 }
 
+model FieldRevealLog {
+  id              String   @id @default(cuid())
+  requestId       String   // Reference to VerificationRequest
+  verifiedEns     String   // ENS name
+  field           String   // Field that was revealed
+  verifierAddress String   // Verifier who saw the value
+  verifierEns     String?  // ENS name of verifier
+  revealedAt      DateTime @default(now())
+  valueHash       String?  // Hash of the value (for audit, not the actual value)
+  
+  createdAt DateTime @default(now())
+
+  @@index([verifiedEns])
+  @@index([verifierAddress])
+  @@index([requestId])
+}
+
