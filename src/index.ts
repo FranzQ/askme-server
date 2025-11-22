@@ -10,7 +10,10 @@ import { createRequestsRouter } from './routes/requests.js';
 
 const app = express();
 const PORT = process.env.PORT || 8080;
-const ETH_RPC_URL = process.env.ETH_RPC_URL || 'https://sepolia.infura.io/v3/9aa3d95b3bc440fa88ea12eaa4456161';
+// Use public Sepolia RPC endpoint (no API key required)
+// Alternatives: https://rpc.ankr.com/eth_sepolia, https://ethereum-sepolia-rpc.publicnode.com
+// Or set ETH_RPC_URL in .env with your own RPC endpoint
+const ETH_RPC_URL = process.env.ETH_RPC_URL || 'https://rpc.ankr.com/eth_sepolia';
 
 // Initialize providers
 const ethProvider = new ethers.JsonRpcProvider(ETH_RPC_URL);
