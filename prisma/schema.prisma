@@ -10,10 +10,27 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// Example model - update based on your needs
-model Example {
-  id        String   @id @default(cuid())
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+model Verification {
+  id              String   @id @default(cuid())
+  verifiedEns     String   // ENS name being verified
+  field           String   // full_name | dob | passport_id
+  fieldHash       String   // keccak256("VerifyENS:"+field+":"+normalizedValue)
+  verifierType    String   // "ens" | "world"
+  verifierId      String   // ens address OR world nullifier
+  ensName         String?  // only for ENS verifiers
+  ownerSnapshot   String?  // 0x... owner address at issuance (for ENS verifiers)
+  expirySnapshot  DateTime? // ENS expiry at issuance (for ENS verifiers)
+  methodUrl       String?  // "how we verify" link
+  status          String   @default("active") // active | revoked | expired
+  sig             String?  // EIP-712 signature (optional for world verifiers)
+  attestationUid  String?  // EAS attestation UID on Base (receipt for on-chain verification)
+  createdAt       DateTime @default(now())
+  revokedAt       DateTime?
+
+  @@index([verifiedEns, field, status])
+  @@index([verifierType, verifierId])
+  @@index([verifiedEns])
+  @@index([attestationUid])
+  @@unique([verifierType, verifierId, verifiedEns, field, fieldHash])
 }
 
