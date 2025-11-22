@@ -28,21 +28,22 @@ app.get('/health', (_req: Request, res: Response) => {
 
 // Get ENS names for an address (GET /api/ensNames/:address)
 app.get('/api/ensNames/:address', async (req: Request<{ address: string }>, res: Response) => {
+  const { address } = req.params;
+
   try {
-    const { address } = req.params;
-    
+
     // Normalize address to lowercase for The Graph query
     const normalizedAddress = address.toLowerCase();
-    
+
     // Query The Graph ENS subgraph to get all names for this address
     // Try multiple subgraph endpoints and query types
     const namesSet = new Set<string>();
-    
+
     // First, try The Graph subgraph (if available for Sepolia)
     try {
       // Try the official ENS subgraph for Sepolia
       const subgraphUrl = 'https://api.studio.thegraph.com/query/49574/enssepolia/version/latest';
-      
+
       const query = `
         {
           domains(where: { owner: "${normalizedAddress}" }) {
@@ -58,7 +59,7 @@ app.get('/api/ensNames/:address', async (req: Request<{ address: string }>, res:
           }
         }
       `;
-      
+
       const response = await fetch(subgraphUrl, {
         method: 'POST',
         headers: {
@@ -66,10 +67,10 @@ app.get('/api/ensNames/:address', async (req: Request<{ address: string }>, res:
         },
         body: JSON.stringify({ query }),
       });
-      
+
       if (response.ok) {
-        const data = await response.json();
-        
+        const data = await response.json() as any;
+
         // Add names from domains
         if (data.data?.domains) {
           for (const domain of data.data.domains) {
@@ -78,7 +79,7 @@ app.get('/api/ensNames/:address', async (req: Request<{ address: string }>, res:
             }
           }
         }
-        
+
         // Add names from wrapped domains
         if (data.data?.wrappedDomains) {
           for (const domain of data.data.wrappedDomains) {
@@ -87,7 +88,7 @@ app.get('/api/ensNames/:address', async (req: Request<{ address: string }>, res:
             }
           }
         }
-        
+
         // Add names from registrations
         if (data.data?.registrations) {
           for (const registration of data.data.registrations) {
@@ -96,13 +97,13 @@ app.get('/api/ensNames/:address', async (req: Request<{ address: string }>, res:
             }
           }
         }
-        
+
         console.log(`The Graph returned ${namesSet.size} names for ${address}`);
       }
     } catch (graphError) {
       console.log('The Graph query failed, using fallback methods:', graphError);
     }
-    
+
     // Always include reverse lookup (primary name)
     try {
       const reverseName = await getEnsName(address, ethProvider);
@@ -113,7 +114,7 @@ app.get('/api/ensNames/:address', async (req: Request<{ address: string }>, res:
     } catch (reverseError) {
       console.log('Reverse lookup failed:', reverseError);
     }
-    
+
     // If we still have no names, try querying the chain directly
     // This is a fallback that queries recent Transfer events
     if (namesSet.size === 0) {
@@ -121,20 +122,33 @@ app.get('/api/ensNames/:address', async (req: Request<{ address: string }>, res:
       // Note: Direct chain querying would require scanning events, which is slow
       // For now, we'll just return what we have
     }
-    
-    const namesArray = Array.from(namesSet);
-    console.log(`Returning ${namesArray.length} ENS names:`, namesArray);
-    
-    res.json({ names: namesArray });
+
+    // Filter out reverse records (technical internal names, not user-facing ENS names)
+    // Reverse records look like: [hash].addr.reverse
+    const filteredNames = Array.from(namesSet).filter((name: string) => {
+      // Exclude reverse records
+      if (name.endsWith('.addr.reverse') || name.startsWith('[')) {
+        return false;
+      }
+      // Only include valid ENS names (ending with .eth or other TLDs)
+      return name.includes('.');
+    });
+
+    console.log(`Returning ${filteredNames.length} ENS names for ${address}:`, filteredNames);
+
+    res.json({ names: filteredNames });
   } catch (error) {
     console.error('Error fetching ENS names:', error);
-    
+
     // Fallback to reverse lookup on error
     try {
-      const ensName = await getEnsName(address, ethProvider);
+      const ensName = await getEnsName(req.params.address, ethProvider);
       const names: string[] = [];
       if (ensName) {
-        names.push(ensName);
+        // Filter out reverse records
+        if (!ensName.endsWith('.addr.reverse') && !ensName.startsWith('[') && ensName.includes('.')) {
+          names.push(ensName);
+        }
       }
       res.json({ names });
     } catch (fallbackError) {
