@@ -34,3 +34,32 @@ model Verification {
   @@unique([verifierType, verifierId, verifiedEns, field, fieldHash])
 }
 
+model VerificationRequest {
+  id              String   @id @default(cuid())
+  verifierAddress String   // Ethereum address of verifier
+  verifierEns     String?  // ENS name of verifier at request time
+  verifiedEns     String   // ENS name being verified
+  field           String   // full_name, dob, or passport_id
+  status          String   @default("pending") // pending, approved, rejected, expired, completed
+  revealMode      String?  // "reveal" or "no-reveal" - set when approved
+  requestedAt     DateTime @default(now())
+  approvedAt      DateTime?
+  expiresAt       DateTime? // When the reveal access expires (e.g., 1 hour after approval)
+  completedAt     DateTime? // When attestation was created
+  
+  // Temporary storage of revealed value (encrypted or plain for MVP)
+  // In production, this should be encrypted
+  // Only set when revealMode = "reveal"
+  revealedValue   String?  // Only set when approved with reveal mode, cleared after expiry
+  
+  // Store the fieldHash when approved (for no-reveal mode verification)
+  fieldHash       String?  // Computed hash when approved, used to verify typed value
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([verifiedEns, status])
+  @@index([verifierAddress, status])
+  @@index([verifiedEns])
+}
+
