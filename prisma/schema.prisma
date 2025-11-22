@@ -80,3 +80,14 @@ model FieldRevealLog {
   @@index([requestId])
 }
 
+model WorldProof {
+  id              String   @id @default(cuid())
+  nullifierHash   String   @unique // World nullifier hash (prevents double verification)
+  merkleRoot      String
+  proof           String
+  signal          String   // e.g., `${verifiedEns}:${fieldHash}`
+  createdAt       DateTime @default(now())
+
+  @@index([nullifierHash])
+}
+
