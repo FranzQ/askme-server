@@ -43,24 +43,31 @@ export async function getEnsOwner(
 
 /**
  * Get expiry timestamp of an ENS name
+ * Note: The ENS Registry doesn't have nameExpires. This would require
+ * querying the Registrar Controller contract, which varies by TLD.
+ * For hackathon purposes, we'll return null and skip expiry validation.
  */
 export async function getEnsExpiry(
   ensName: string,
   provider: JsonRpcProvider
 ): Promise<Date | null> {
   try {
-    const registry = new Contract(ENS_REGISTRY, ENS_RESOLVER_ABI, provider);
-    const namehash = ethers.namehash(ensName);
-    const expirySeconds = await registry.nameExpires(namehash);
-    
-    if (expirySeconds === 0n) {
-      return null; // No expiry (old ENS or not found)
+    // First check if the name exists by getting the owner
+    const owner = await getEnsOwner(ensName, provider);
+    if (!owner) {
+      return null; // Name doesn't exist
     }
-    
-    // Convert to Date (expirySeconds is Unix timestamp)
-    return new Date(Number(expirySeconds) * 1000);
-  } catch (error) {
-    console.error('Error getting ENS expiry:', error);
+
+    // The ENS Registry contract doesn't have nameExpires function
+    // For hackathon, we'll skip expiry checking and return null
+    // In production, you'd need to query the appropriate Registrar Controller
+    return null;
+  } catch (error: any) {
+    // Silently handle errors - expiry checking is optional for hackathon
+    // Only log if it's not a contract call error
+    if (error?.code !== 'CALL_EXCEPTION') {
+      console.error('Error getting ENS expiry:', error);
+    }
     return null;
   }
 }
