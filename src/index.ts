@@ -197,8 +197,30 @@ app.post('/api/verifications', async (req: Request<{}, {}, CreateVerificationBod
     const verifiedEnsOwner = await getEnsOwner(verifiedEns, ethProvider);
     const verifiedEnsExpiry = await getEnsExpiry(verifiedEns, ethProvider);
 
-    const verification = await prisma.verification.create({
-      data: {
+    // Use upsert to handle case where verification already exists (e.g., was revoked)
+    // This will update the existing verification or create a new one
+    const verification = await prisma.verification.upsert({
+      where: {
+        verifierType_verifierId_verifiedEns_field_fieldHash: {
+          verifierType: 'ens',
+          verifierId: verifierAddress.toLowerCase(),
+          verifiedEns: verifiedEns.toLowerCase(),
+          field,
+          fieldHash,
+        },
+      },
+      update: {
+        // Update existing verification (e.g., reactivate if it was revoked)
+        ensName: verifierEnsSnapshot,
+        ownerSnapshot: verifiedEnsOwner || null,
+        expirySnapshot: verifiedEnsExpiry || null,
+        methodUrl: methodUrl || null,
+        status: 'active',
+        sig,
+        attestationUid: attestationUid || undefined, // Only update if provided
+        revokedAt: null, // Clear revocation timestamp
+      },
+      create: {
         verifiedEns: verifiedEns.toLowerCase(),
         field,
         fieldHash,
@@ -370,21 +392,37 @@ app.post('/verify/world', async (req: Request<{}, {}, VerifyWorldBody>, res: Res
       }
     }
 
-    const existingProof = await prisma.worldProof.findUnique({
-      where: { nullifierHash: worldProof.nullifierHash },
+    // Check if this specific verification already exists
+    // (same World ID proof + same field + same fieldHash)
+    const existingVerification = await prisma.verification.findUnique({
+      where: {
+        verifierType_verifierId_verifiedEns_field_fieldHash: {
+          verifierType: 'world',
+          verifierId: worldProof.nullifierHash,
+          verifiedEns: verifiedEns.toLowerCase(),
+          field,
+          fieldHash,
+        },
+      },
     });
 
-    if (existingProof) {
-      return res.status(400).json({ error: 'This World ID proof has already been used' });
+    if (existingVerification) {
+      return res.status(400).json({ error: 'This field has already been verified with this World ID proof' });
     }
 
-    // Stringify proof if it's an array (World ID returns proof as array)
+    // Store or update the WorldProof record
+    // The same nullifier hash can be used for multiple fields, so we use upsert
     const proofString = Array.isArray(worldProof.proof) 
       ? JSON.stringify(worldProof.proof) 
       : worldProof.proof;
 
-    await prisma.worldProof.create({
-      data: {
+    await prisma.worldProof.upsert({
+      where: { nullifierHash: worldProof.nullifierHash },
+      update: {
+        // Update signal if it's different (though it usually won't be)
+        signal: worldProof.signal || `${verifiedEns}:${fieldHash}`,
+      },
+      create: {
         nullifierHash: worldProof.nullifierHash,
         merkleRoot: worldProof.merkleRoot,
         proof: proofString,
